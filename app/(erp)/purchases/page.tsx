@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency, formatDate } from '@/lib/format';
-import { ShoppingBag, Plus, Search, Eye, CheckCircle2, Clock, Truck, XCircle } from 'lucide-react';
-import type { PurchaseOrder, PurchaseOrderStatus } from '@/lib/types';
+import { toast } from '@/hooks/use-toast';
+import { Plus, Search, Eye, X, Trash2, CheckCircle, Truck } from 'lucide-react';
+import type { PurchaseOrder, PurchaseOrderStatus, Supplier, Product } from '@/lib/types';
 
 const statusConfig: Record<PurchaseOrderStatus, { label: string; color: string; bg: string }> = {
   draft: { label: 'Draft', color: 'text-gray-600', bg: 'bg-gray-100' },
@@ -15,27 +16,68 @@ const statusConfig: Record<PurchaseOrderStatus, { label: string; color: string; 
   cancelled: { label: 'Cancelled', color: 'text-red-600', bg: 'bg-red-100' },
 };
 
+interface PurchaseOrderWithSupplier extends Omit<PurchaseOrder, 'supplier'> {
+  supplier?: { name: string; code: string; phone?: string };
+}
+
 export default function PurchasesPage() {
-  const [orders, setOrders] = useState<any[]>([]);
+  const [orders, setOrders] = useState<PurchaseOrderWithSupplier[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [stats, setStats] = useState({ total: 0, pending: 0, received: 0, outstanding: 0 });
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [viewingOrder, setViewingOrder] = useState<PurchaseOrderWithSupplier | null>(null);
+  const [orderItems, setOrderItems] = useState<any[]>([]);
 
   useEffect(() => { loadData(); }, []);
 
   async function loadData() {
     setLoading(true);
-    const { data } = await supabase.from('purchase_orders').select('*, supplier:suppliers(name, code)').order('created_at', { ascending: false });
-    setOrders(data || []);
-    const all = data || [];
+    const [poRes, supRes, prodRes] = await Promise.all([
+      supabase.from('purchase_orders').select('*, supplier:suppliers(name, code, phone)').order('created_at', { ascending: false }),
+      supabase.from('suppliers').select('*').eq('is_active', true).order('name'),
+      supabase.from('products').select('*').eq('is_active', true).order('name'),
+    ]);
+    setOrders(poRes.data || []);
+    setSuppliers(supRes.data || []);
+    setProducts(prodRes.data || []);
+
+    const all = poRes.data || [];
     setStats({
       total: all.length,
-      pending: all.filter((o: any) => ['draft','pending_approval','approved'].includes(o.status)).length,
+      pending: all.filter((o: any) => ['draft', 'pending_approval', 'approved'].includes(o.status)).length,
       received: all.filter((o: any) => o.status === 'received').length,
       outstanding: all.reduce((s: number, o: any) => s + (Number(o.total_amount) - Number(o.amount_paid)), 0),
     });
     setLoading(false);
+  }
+
+  async function viewOrderDetails(order: PurchaseOrderWithSupplier) {
+    const { data } = await supabase
+      .from('purchase_order_items')
+      .select('*, product:products(name, sku, unit)')
+      .eq('purchase_order_id', order.id);
+    setOrderItems(data || []);
+    setViewingOrder(order);
+  }
+
+  async function updateOrderStatus(order: PurchaseOrderWithSupplier, newStatus: PurchaseOrderStatus) {
+    const { error } = await supabase
+      .from('purchase_orders')
+      .update({ status: newStatus })
+      .eq('id', order.id);
+    if (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    } else {
+      toast({ title: 'Success', description: `Order ${newStatus === 'approved' ? 'approved' : newStatus}` });
+      loadData();
+      if (viewingOrder?.id === order.id) {
+        setViewingOrder({ ...viewingOrder, status: newStatus });
+      }
+    }
   }
 
   const filtered = orders.filter(o =>
@@ -50,21 +92,21 @@ export default function PurchasesPage() {
           <h1 className="text-2xl font-bold text-foreground">Purchase Orders</h1>
           <p className="text-muted-foreground text-sm mt-0.5">Manage procurement and supplier orders</p>
         </div>
-        <button className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition">
+        <button onClick={() => setShowCreateModal(true)} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition">
           <Plus className="w-4 h-4" />New Purchase Order
         </button>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Total Orders', value: stats.total || 4, color: 'text-blue-500 bg-blue-50' },
-          { label: 'Pending', value: stats.pending || 1, color: 'text-amber-500 bg-amber-50' },
-          { label: 'Received', value: stats.received || 2, color: 'text-green-500 bg-green-50' },
-          { label: 'Outstanding', value: formatCurrency(stats.outstanding || 230000), color: 'text-red-500 bg-red-50' },
+          { label: 'Total Orders', value: stats.total, color: 'text-blue-500' },
+          { label: 'Pending', value: stats.pending, color: 'text-amber-500' },
+          { label: 'Received', value: stats.received, color: 'text-green-500' },
+          { label: 'Outstanding', value: formatCurrency(stats.outstanding), color: 'text-red-500' },
         ].map(s => (
           <div key={s.label} className="stat-card">
             <p className="text-xs text-muted-foreground">{s.label}</p>
-            <p className={`text-xl font-bold mt-1 ${s.color.split(' ')[0]}`}>{s.value}</p>
+            <p className={`text-xl font-bold mt-1 ${s.color}`}>{s.value}</p>
           </div>
         ))}
       </div>
@@ -97,23 +139,27 @@ export default function PurchasesPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {loading ? Array.from({length: 5}).map((_, i) => (
-                <tr key={i}>{Array.from({length: 9}).map((_, j) => <td key={j} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse" /></td>)}</tr>
-              )) : filtered.map((o: any) => {
+              {loading ? Array.from({ length: 5 }).map((_, i) => (
+                <tr key={i}>{Array.from({ length: 9 }).map((_, j) => <td key={j} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse" /></td>)}</tr>
+              )) : filtered.length === 0 ? (
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-muted-foreground text-sm">No purchase orders found</td></tr>
+              ) : filtered.map((o) => {
                 const cfg = statusConfig[o.status as PurchaseOrderStatus] || statusConfig.draft;
                 const balance = Number(o.total_amount) - Number(o.amount_paid);
                 return (
                   <tr key={o.id} className="hover:bg-muted/30 transition-colors">
                     <td className="px-4 py-3"><span className="text-sm font-semibold text-blue-600">{o.po_number}</span></td>
-                    <td className="px-4 py-3 text-sm text-foreground">{o.supplier?.name || '—'}</td>
+                    <td className="px-4 py-3 text-sm text-foreground">{o.supplier?.name || '-'}</td>
                     <td className="px-4 py-3 text-sm text-muted-foreground">{formatDate(o.order_date)}</td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">{o.expected_date ? formatDate(o.expected_date) : '—'}</td>
+                    <td className="px-4 py-3 text-sm text-muted-foreground">{o.expected_date ? formatDate(o.expected_date) : '-'}</td>
                     <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatCurrency(o.total_amount)}</td>
                     <td className="px-4 py-3 text-right text-sm text-green-600 font-semibold">{formatCurrency(o.amount_paid)}</td>
-                    <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{balance > 0 ? formatCurrency(balance) : '—'}</td>
+                    <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{balance > 0 ? formatCurrency(balance) : '-'}</td>
                     <td className="px-4 py-3"><span className={`badge-status ${cfg.bg} ${cfg.color}`}>{cfg.label}</span></td>
                     <td className="px-4 py-3 text-right">
-                      <button className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition ml-auto"><Eye className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => viewOrderDetails(o)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition ml-auto">
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
                     </td>
                   </tr>
                 );
@@ -122,6 +168,309 @@ export default function PurchasesPage() {
           </table>
         </div>
         <div className="px-4 py-3 border-t border-border"><p className="text-xs text-muted-foreground">{filtered.length} orders</p></div>
+      </div>
+
+      {showCreateModal && (
+        <CreatePOModal
+          suppliers={suppliers}
+          products={products}
+          onClose={() => setShowCreateModal(false)}
+          onSaved={loadData}
+        />
+      )}
+
+      {viewingOrder && (
+        <ViewPOModal
+          order={viewingOrder}
+          items={orderItems}
+          onClose={() => setViewingOrder(null)}
+          onUpdateStatus={(status) => updateOrderStatus(viewingOrder, status)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreatePOModal({ suppliers, products, onClose, onSaved }: {
+  suppliers: Supplier[];
+  products: Product[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [form, setForm] = useState({
+    supplier_id: '',
+    order_date: new Date().toISOString().split('T')[0],
+    expected_date: '',
+    notes: '',
+  });
+  const [items, setItems] = useState<{ product_id: string; quantity: number; unit_price: number }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  function addItem() {
+    setItems([...items, { product_id: '', quantity: 1, unit_price: 0 }]);
+  }
+
+  function updateItem(index: number, field: string, value: any) {
+    const updated = [...items];
+    if (field === 'product_id') {
+      const product = products.find(p => p.id === value);
+      updated[index] = { product_id: value, quantity: 1, unit_price: product?.cost_price || 0 };
+    } else {
+      (updated[index] as any)[field] = value;
+    }
+    setItems(updated);
+  }
+
+  function removeItem(index: number) {
+    setItems(items.filter((_, i) => i !== index));
+  }
+
+  const subtotal = items.reduce((sum, item) => {
+    const product = products.find(p => p.id === item.product_id);
+    return sum + (item.quantity * (item.unit_price || product?.cost_price || 0));
+  }, 0);
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form.supplier_id) { setError('Please select a supplier'); return; }
+    if (items.length === 0) { setError('Please add at least one item'); return; }
+
+    setSaving(true);
+    setError('');
+
+    const poNumber = `PO-${Date.now().toString().slice(-6)}`;
+
+    const { data: po, error: poError } = await supabase
+      .from('purchase_orders')
+      .insert({
+        po_number: poNumber,
+        supplier_id: form.supplier_id,
+        order_date: form.order_date,
+        expected_date: form.expected_date || null,
+        subtotal,
+        total_amount: subtotal,
+        amount_paid: 0,
+        status: 'draft',
+      })
+      .select()
+      .single();
+
+    if (poError) { setError(poError.message); setSaving(false); return; }
+
+    const poItems = items.map(item => ({
+      purchase_order_id: po.id,
+      product_id: item.product_id,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      subtotal: item.quantity * item.unit_price,
+    }));
+
+    const { error: itemsError } = await supabase.from('purchase_order_items').insert(poItems);
+    if (itemsError) { setError(itemsError.message); setSaving(false); return; }
+
+    toast({ title: 'Success', description: 'Purchase order created successfully' });
+    onSaved();
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white z-10">
+          <h2 className="text-base font-bold">Create Purchase Order</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        <form onSubmit={handleSave} className="p-6 space-y-4">
+          {error && <div className="p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>}
+
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-medium mb-1">Supplier *</label>
+              <select required value={form.supplier_id} onChange={e => setForm({ ...form, supplier_id: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none">
+                <option value="">Select supplier</option>
+                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name} ({s.code})</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1">Order Date</label>
+              <input type="date" value={form.order_date} onChange={e => setForm({ ...form, order_date: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1">Expected Date</label>
+              <input type="date" value={form.expected_date} onChange={e => setForm({ ...form, expected_date: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium">Line Items</label>
+              <button type="button" onClick={addItem} className="text-xs text-blue-600 hover:text-blue-700 font-medium">+ Add Item</button>
+            </div>
+            <div className="border border-border rounded-lg overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-muted/40">
+                  <tr>
+                    <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Product</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-20">Qty</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-28">Cost</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2 w-28">Total</th>
+                    <th className="w-8"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {items.length === 0 ? (
+                    <tr><td colSpan={5} className="px-3 py-4 text-center text-xs text-muted-foreground">No items added. Click "Add Item" to add products.</td></tr>
+                  ) : items.map((item, index) => (
+                    <tr key={index}>
+                      <td className="px-3 py-2">
+                        <select value={item.product_id} onChange={e => updateItem(index, 'product_id', e.target.value)} className="w-full border border-border rounded px-2 py-1 text-sm focus:outline-none">
+                          <option value="">Select product</option>
+                          {products.map(p => <option key={p.id} value={p.id}>{p.name} ({p.sku})</option>)}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2">
+                        <input type="number" min="1" value={item.quantity} onChange={e => updateItem(index, 'quantity', parseInt(e.target.value) || 1)} className="w-full border border-border rounded px-2 py-1 text-sm text-right focus:outline-none" />
+                      </td>
+                      <td className="px-3 py-2">
+                        <input type="number" min="0" step="0.01" value={item.unit_price} onChange={e => updateItem(index, 'unit_price', parseFloat(e.target.value) || 0)} className="w-full border border-border rounded px-2 py-1 text-sm text-right focus:outline-none" />
+                      </td>
+                      <td className="px-3 py-2 text-right text-sm font-semibold">{formatCurrency(item.quantity * item.unit_price)}</td>
+                      <td className="px-2 py-2">
+                        <button type="button" onClick={() => removeItem(index)} className="text-red-500 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="flex justify-end bg-muted/30 rounded-lg p-3">
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">Total</p>
+              <p className="text-lg font-bold text-foreground">{formatCurrency(subtotal)}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button type="button" onClick={onClose} className="px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
+            <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60">
+              {saving ? 'Creating...' : 'Create Purchase Order'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ViewPOModal({ order, items, onClose, onUpdateStatus }: {
+  order: PurchaseOrderWithSupplier;
+  items: any[];
+  onClose: () => void;
+  onUpdateStatus: (status: PurchaseOrderStatus) => void;
+}) {
+  const cfg = statusConfig[order.status as PurchaseOrderStatus] || statusConfig.draft;
+  const balance = Number(order.total_amount) - Number(order.amount_paid);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white">
+          <h2 className="text-base font-bold">Purchase Order {order.po_number}</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="flex justify-between">
+            <div>
+              <p className="text-xs text-muted-foreground">Supplier</p>
+              <p className="font-semibold text-foreground">{order.supplier?.name || '-'}</p>
+              <p className="text-sm text-muted-foreground">{order.supplier?.phone || '-'}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">Status</p>
+              <span className={`badge-status ${cfg.bg} ${cfg.color}`}>{cfg.label}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4 py-3 border-y border-border">
+            <div>
+              <p className="text-xs text-muted-foreground">Order Date</p>
+              <p className="text-sm font-medium">{formatDate(order.order_date)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Expected Date</p>
+              <p className="text-sm font-medium">{order.expected_date ? formatDate(order.expected_date) : '-'}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Amount Paid</p>
+              <p className="text-sm font-medium text-green-600">{formatCurrency(order.amount_paid)}</p>
+            </div>
+          </div>
+
+          <div>
+            <p className="text-xs font-medium mb-2">Items</p>
+            <div className="border border-border rounded-lg overflow-hidden">
+              <table className="w-full">
+                <thead className="bg-muted/40">
+                  <tr>
+                    <th className="text-left text-xs font-semibold text-muted-foreground px-3 py-2">Product</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2">Qty</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2">Cost</th>
+                    <th className="text-right text-xs font-semibold text-muted-foreground px-3 py-2">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {items.length === 0 ? (
+                    <tr><td colSpan={4} className="px-3 py-4 text-center text-xs text-muted-foreground">No items</td></tr>
+                  ) : items.map((item, idx) => (
+                    <tr key={idx}>
+                      <td className="px-3 py-2 text-sm">{item.product?.name || '-'}</td>
+                      <td className="px-3 py-2 text-sm text-right">{item.quantity}</td>
+                      <td className="px-3 py-2 text-sm text-right">{formatCurrency(item.unit_price)}</td>
+                      <td className="px-3 py-2 text-sm text-right font-semibold">{formatCurrency(item.subtotal)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="flex justify-end bg-muted/30 rounded-lg p-4">
+            <div className="w-48 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Total</span>
+                <span>{formatCurrency(order.total_amount)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Paid</span>
+                <span className="text-green-600">{formatCurrency(order.amount_paid)}</span>
+              </div>
+              <div className="flex justify-between font-bold text-base border-t border-border pt-2">
+                <span>Balance</span>
+                <span className="text-red-600">{formatCurrency(balance)}</span>
+              </div>
+            </div>
+          </div>
+
+          {order.status === 'draft' && (
+            <div className="flex gap-2">
+              <button onClick={() => onUpdateStatus('approved')} className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 text-white py-2 rounded-lg text-sm font-semibold transition">
+                <CheckCircle className="w-4 h-4" />Approve Order
+              </button>
+            </div>
+          )}
+
+          {order.status === 'approved' && (
+            <div className="flex gap-2">
+              <button onClick={() => onUpdateStatus('received')} className="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg text-sm font-semibold transition">
+                <Truck className="w-4 h-4" />Mark as Received
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

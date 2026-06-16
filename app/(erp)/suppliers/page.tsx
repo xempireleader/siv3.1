@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
-import { Truck, Plus, Search, Edit, Phone, Mail, Star } from 'lucide-react';
+import { toast } from '@/hooks/use-toast';
+import { Truck, Plus, Search, Edit, Trash2, Phone, Mail, Star, X } from 'lucide-react';
 import type { Supplier } from '@/lib/types';
 
 export default function SuppliersPage() {
@@ -11,12 +12,14 @@ export default function SuppliersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+  const [deletingSupplier, setDeletingSupplier] = useState<Supplier | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
   async function loadData() {
     setLoading(true);
-    const { data } = await supabase.from('suppliers').select('*').eq('is_active', true).order('name');
+    const { data } = await supabase.from('suppliers').select('*').order('name');
     setSuppliers(data || []);
     setLoading(false);
   }
@@ -25,8 +28,20 @@ export default function SuppliersPage() {
     !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.code.toLowerCase().includes(search.toLowerCase())
   );
 
-  const totalOutstanding = suppliers.reduce((s, sup) => s + sup.outstanding_balance, 0);
-  const totalPurchases = suppliers.reduce((s, sup) => s + sup.total_purchases, 0);
+  const totalOutstanding = suppliers.filter(s => s.is_active).reduce((sum, s) => sum + s.outstanding_balance, 0);
+  const totalPurchases = suppliers.filter(s => s.is_active).reduce((sum, s) => sum + s.total_purchases, 0);
+
+  async function handleDelete() {
+    if (!deletingSupplier) return;
+    const { error } = await supabase.from('suppliers').update({ is_active: false }).eq('id', deletingSupplier.id);
+    if (error) {
+      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+    } else {
+      toast({ title: 'Success', description: 'Supplier deactivated successfully' });
+      loadData();
+    }
+    setDeletingSupplier(null);
+  }
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -42,7 +57,7 @@ export default function SuppliersPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Total Suppliers', value: suppliers.length },
+          { label: 'Total Suppliers', value: suppliers.filter(s => s.is_active).length },
           { label: 'Active', value: suppliers.filter(s => s.is_active).length },
           { label: 'Total Purchases', value: formatCurrency(totalPurchases) },
           { label: 'Outstanding Payables', value: formatCurrency(totalOutstanding) },
@@ -77,10 +92,12 @@ export default function SuppliersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {loading ? Array.from({length: 5}).map((_, i) => (
-                <tr key={i}>{Array.from({length: 8}).map((_, j) => <td key={j} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse" /></td>)}</tr>
-              )) : filtered.map((s) => (
-                <tr key={s.id} className="hover:bg-muted/30 transition-colors">
+              {loading ? Array.from({ length: 5 }).map((_, i) => (
+                <tr key={i}>{Array.from({ length: 8 }).map((_, j) => <td key={j} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse" /></td>)}</tr>
+              )) : filtered.length === 0 ? (
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-muted-foreground text-sm">No suppliers found</td></tr>
+              ) : filtered.map((s) => (
+                <tr key={s.id} className={`hover:bg-muted/30 transition-colors ${!s.is_active ? 'opacity-50' : ''}`}>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center text-orange-700 text-sm font-bold">{s.name[0]}</div>
@@ -96,24 +113,152 @@ export default function SuppliersPage() {
                       {s.email && <div className="flex items-center gap-1"><Mail className="w-3 h-3" />{s.email}</div>}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-foreground">{s.city || '—'}</td>
+                  <td className="px-4 py-3 text-sm text-foreground">{s.city || '-'}</td>
                   <td className="px-4 py-3 text-right text-sm text-foreground">{formatCurrency(s.credit_limit)}</td>
                   <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatCurrency(s.total_purchases)}</td>
-                  <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{s.outstanding_balance > 0 ? formatCurrency(s.outstanding_balance) : '—'}</td>
+                  <td className="px-4 py-3 text-right text-sm font-bold text-red-600">{s.outstanding_balance > 0 ? formatCurrency(s.outstanding_balance) : '-'}</td>
                   <td className="px-4 py-3">
                     <div className="flex gap-0.5">
-                      {Array.from({length: 5}).map((_, i) => (
+                      {Array.from({ length: 5 }).map((_, i) => (
                         <Star key={i} className={`w-3 h-3 ${i < (s.rating || 0) ? 'text-amber-400 fill-amber-400' : 'text-muted-foreground'}`} />
                       ))}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition ml-auto"><Edit className="w-3.5 h-3.5" /></button>
+                    <div className="flex items-center justify-end gap-1">
+                      <button onClick={() => setEditingSupplier(s)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 text-muted-foreground hover:text-blue-600 transition"><Edit className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => setDeletingSupplier(s)} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {showAddModal && <SupplierModal onClose={() => setShowAddModal(false)} onSaved={loadData} />}
+      {editingSupplier && <SupplierModal supplier={editingSupplier} onClose={() => setEditingSupplier(null)} onSaved={loadData} />}
+      {deletingSupplier && (
+        <DeleteConfirmModal name={deletingSupplier.name} onClose={() => setDeletingSupplier(null)} onConfirm={handleDelete} />
+      )}
+    </div>
+  );
+}
+
+function SupplierModal({ supplier, onClose, onSaved }: { supplier?: Supplier | null; onClose: () => void; onSaved: () => void }) {
+  const isEdit = !!supplier;
+  const [form, setForm] = useState({
+    name: supplier?.name || '',
+    code: supplier?.code || '',
+    company_name: supplier?.company_name || '',
+    phone: supplier?.phone || '',
+    email: supplier?.email || '',
+    mobile: supplier?.mobile || '',
+    city: supplier?.city || '',
+    address: supplier?.address || '',
+    credit_limit: supplier?.credit_limit?.toString() || '0',
+    credit_days: supplier?.credit_days?.toString() || '30',
+    rating: supplier?.rating?.toString() || '0',
+    is_active: supplier?.is_active ?? true,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError('');
+
+    const data = {
+      name: form.name,
+      code: form.code,
+      company_name: form.company_name || null,
+      phone: form.phone || null,
+      email: form.email || null,
+      mobile: form.mobile || null,
+      city: form.city || null,
+      address: form.address || null,
+      credit_limit: Number(form.credit_limit),
+      credit_days: Number(form.credit_days),
+      rating: Number(form.rating),
+      is_active: form.is_active,
+      country: supplier?.country || 'Bangladesh',
+    };
+
+    const { error } = isEdit
+      ? await supabase.from('suppliers').update(data).eq('id', supplier!.id)
+      : await supabase.from('suppliers').insert(data);
+
+    if (error) { setError(error.message); setSaving(false); return; }
+
+    toast({ title: 'Success', description: isEdit ? 'Supplier updated successfully' : 'Supplier created successfully' });
+    onSaved();
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-white">
+          <h2 className="text-base font-bold">{isEdit ? 'Edit Supplier' : 'Add New Supplier'}</h2>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        <form onSubmit={handleSave} className="p-6 space-y-4">
+          {error && <div className="p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>}
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className="block text-xs font-medium mb-1">Supplier Name *</label><input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+            <div><label className="block text-xs font-medium mb-1">Code *</label><input required value={form.code} onChange={e => setForm({ ...form, code: e.target.value })} placeholder="SUP-XXX" className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          </div>
+          <div><label className="block text-xs font-medium mb-1">Company Name</label><input value={form.company_name} onChange={e => setForm({ ...form, company_name: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className="block text-xs font-medium mb-1">Phone</label><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+            <div><label className="block text-xs font-medium mb-1">Mobile</label><input value={form.mobile} onChange={e => setForm({ ...form, mobile: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div><label className="block text-xs font-medium mb-1">Email</label><input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+            <div><label className="block text-xs font-medium mb-1">City</label><input value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          </div>
+          <div><label className="block text-xs font-medium mb-1">Address</label><textarea value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} rows={2} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          <div className="grid grid-cols-3 gap-4">
+            <div><label className="block text-xs font-medium mb-1">Credit Limit</label><input type="number" min="0" value={form.credit_limit} onChange={e => setForm({ ...form, credit_limit: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+            <div><label className="block text-xs font-medium mb-1">Credit Days</label><input type="number" min="0" value={form.credit_days} onChange={e => setForm({ ...form, credit_days: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+            <div><label className="block text-xs font-medium mb-1">Rating (1-5)</label><input type="number" min="0" max="5" value={form.rating} onChange={e => setForm({ ...form, rating: e.target.value })} className="w-full border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
+          </div>
+          {isEdit && (
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={form.is_active} onChange={e => setForm({ ...form, is_active: e.target.checked })} className="rounded" />
+              <span className="text-sm">Active</span>
+            </label>
+          )}
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button type="button" onClick={onClose} className="px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
+            <button type="submit" disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-60">
+              {saving ? 'Saving...' : isEdit ? 'Update Supplier' : 'Save Supplier'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function DeleteConfirmModal({ name, onClose, onConfirm }: { name: string; onClose: () => void; onConfirm: () => void }) {
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl">
+        <div className="p-6">
+          <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <Trash2 className="w-6 h-6 text-red-600" />
+          </div>
+          <h2 className="text-lg font-bold text-center mb-2">Deactivate Supplier?</h2>
+          <p className="text-sm text-muted-foreground text-center mb-6">
+            Are you sure you want to deactivate <span className="font-semibold text-foreground">{name}</span>?
+          </p>
+          <div className="flex gap-3">
+            <button onClick={onClose} className="flex-1 px-4 py-2 border border-border rounded-lg text-sm hover:bg-muted transition">Cancel</button>
+            <button onClick={onConfirm} className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition">Deactivate</button>
+          </div>
         </div>
       </div>
     </div>

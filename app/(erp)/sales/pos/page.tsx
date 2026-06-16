@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { formatCurrency } from '@/lib/format';
-import { Search, Plus, Minus, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CheckCircle2, X } from 'lucide-react';
+import { toast } from '@/hooks/use-toast';
+import { Search, Plus, Minus, Trash2, ShoppingCart, CreditCard, Banknote, Smartphone, CheckCircle2, X, Receipt } from 'lucide-react';
 
 interface CartItem {
   id: string;
@@ -25,6 +26,7 @@ export default function POSPage() {
   const [discount, setDiscount] = useState(0);
   const [orderComplete, setOrderComplete] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [lastInvoiceNumber, setLastInvoiceNumber] = useState('');
 
   useEffect(() => {
     loadProducts();
@@ -33,13 +35,13 @@ export default function POSPage() {
 
   async function loadProducts() {
     setLoading(true);
-    const { data } = await supabase.from('products').select('*, inventory_items(quantity_on_hand)').eq('is_active', true).limit(50);
+    const { data } = await supabase.from('products').select('*, inventory_items(quantity_on_hand)').eq('is_active', true).limit(100);
     setProducts(data || []);
     setLoading(false);
   }
 
   async function loadCustomers() {
-    const { data } = await supabase.from('customers').select('id, name, code').limit(50);
+    const { data } = await supabase.from('customers').select('id, name, code').eq('is_active', true).limit(100);
     setCustomers(data || []);
   }
 
@@ -70,12 +72,55 @@ export default function POSPage() {
   async function processOrder() {
     if (cart.length === 0) return;
     setProcessing(true);
-    await new Promise(r => setTimeout(r, 1500));
-    setCart([]);
-    setDiscount(0);
-    setOrderComplete(true);
+
+    try {
+      const invoiceNumber = `POS-${Date.now().toString().slice(-8)}`;
+      setLastInvoiceNumber(invoiceNumber);
+
+      const { data: invoice, error: invError } = await supabase
+        .from('invoices')
+        .insert({
+          invoice_number: invoiceNumber,
+          customer_id: selectedCustomer || null,
+          invoice_date: new Date().toISOString().split('T')[0],
+          subtotal: subtotal,
+          discount_amount: discountAmount,
+          tax_amount: 0,
+          total_amount: total,
+          amount_paid: total,
+          balance_due: 0,
+          status: 'paid',
+          is_pos: true,
+        })
+        .select()
+        .single();
+
+      if (invError) throw invError;
+
+      const invoiceItems = cart.map(item => ({
+        invoice_id: invoice.id,
+        product_id: item.id,
+        quantity: item.quantity,
+        unit_price: item.sale_price,
+        discount_percent: discount,
+        tax_rate: 0,
+        subtotal: item.quantity * item.sale_price,
+      }));
+
+      const { error: itemsError } = await supabase.from('invoice_items').insert(invoiceItems);
+      if (itemsError) throw itemsError;
+
+      setCart([]);
+      setDiscount(0);
+      setSelectedCustomer('');
+      setOrderComplete(true);
+      toast({ title: 'Success', description: `Order ${invoiceNumber} completed successfully` });
+    } catch (error: any) {
+      toast({ title: 'Error', description: error.message || 'Failed to process order', variant: 'destructive' });
+    }
+
     setProcessing(false);
-    setTimeout(() => setOrderComplete(false), 3000);
+    setTimeout(() => setOrderComplete(false), 4000);
   }
 
   const paymentMethods = [
@@ -87,7 +132,6 @@ export default function POSPage() {
 
   return (
     <div className="flex h-[calc(100vh-120px)] gap-4 animate-fade-in">
-      {/* Product Panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="flex items-center gap-3 mb-4">
           <div className="relative flex-1">
@@ -99,25 +143,28 @@ export default function POSPage() {
               className="w-full pl-10 pr-4 py-2.5 border border-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 bg-white"
             />
           </div>
-          <select value={selectedCustomer} onChange={e => setSelectedCustomer(e.target.value)} className="border border-border rounded-xl px-3 py-2.5 text-sm bg-white focus:outline-none min-w-[160px]">
+          <select value={selectedCustomer} onChange={e => setSelectedCustomer(e.target.value)} className="border border-border rounded-xl px-3 py-2.5 text-sm bg-white focus:outline-none min-w-[180px]">
             <option value="">Walk-in Customer</option>
-            {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {customers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.code})</option>)}
           </select>
         </div>
 
-        <div className="flex-1 overflow-y-auto grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 content-start">
-          {loading ? Array.from({length: 12}).map((_, i) => (
+        <div className="flex-1 overflow-y-auto grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 content-start pb-4">
+          {loading ? Array.from({ length: 12 }).map((_, i) => (
             <div key={i} className="bg-white rounded-xl border border-border p-3 animate-pulse"><div className="h-20 bg-muted rounded-lg mb-2" /><div className="h-3 bg-muted rounded mb-1" /><div className="h-3 bg-muted rounded w-2/3" /></div>
-          )) : filteredProducts.map(p => {
+          )) : filteredProducts.length === 0 ? (
+            <div className="col-span-full text-center py-12 text-muted-foreground">No products found</div>
+          ) : filteredProducts.map(p => {
             const stock = p.inventory_items?.reduce((s: number, i: any) => s + Number(i.quantity_on_hand), 0) || 0;
             return (
               <button
                 key={p.id}
                 onClick={() => addToCart(p)}
-                className="bg-white rounded-xl border border-border p-3 text-left hover:border-blue-400 hover:shadow-md transition-all group"
+                disabled={stock === 0}
+                className="bg-white rounded-xl border border-border p-3 text-left hover:border-blue-400 hover:shadow-md transition-all group disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="w-full h-20 bg-muted rounded-lg overflow-hidden mb-2">
-                  {p.image_url ? <img src={p.image_url} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform" /> : <div className="w-full h-full flex items-center justify-center text-muted-foreground text-2xl">📦</div>}
+                  {p.image_url ? <img src={p.image_url} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform" /> : <div className="w-full h-full flex items-center justify-center text-muted-foreground text-2xl">?</div>}
                 </div>
                 <p className="text-xs font-semibold text-foreground leading-tight mb-0.5 line-clamp-2">{p.name}</p>
                 <p className="text-[10px] text-muted-foreground mb-1">{p.sku}</p>
@@ -131,8 +178,7 @@ export default function POSPage() {
         </div>
       </div>
 
-      {/* Cart Panel */}
-      <div className="w-80 flex flex-col bg-white rounded-2xl border border-border shadow-sm overflow-hidden">
+      <div className="w-80 flex flex-col bg-white rounded-2xl border border-border shadow-sm overflow-hidden relative">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <h2 className="font-bold text-foreground flex items-center gap-2"><ShoppingCart className="w-4 h-4" />Cart ({cart.length})</h2>
           {cart.length > 0 && <button onClick={() => setCart([])} className="text-xs text-red-500 hover:underline">Clear</button>}
@@ -150,7 +196,7 @@ export default function POSPage() {
           ) : cart.map(item => (
             <div key={item.id} className="flex items-center gap-2 bg-muted/30 rounded-xl p-2">
               <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shrink-0 overflow-hidden">
-                {item.image_url ? <img src={item.image_url} alt="" className="w-full h-full object-cover" /> : <span className="text-base">📦</span>}
+                {item.image_url ? <img src={item.image_url} alt="" className="w-full h-full object-cover" /> : <span className="text-base">?</span>}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-[11px] font-semibold text-foreground truncate">{item.name}</p>
@@ -168,20 +214,17 @@ export default function POSPage() {
 
         {cart.length > 0 && (
           <div className="p-3 border-t border-border space-y-3">
-            {/* Discount */}
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground flex-1">Discount %</span>
               <input type="number" min="0" max="100" value={discount} onChange={e => setDiscount(Number(e.target.value))} className="w-16 border border-border rounded-lg px-2 py-1 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500/20" />
             </div>
 
-            {/* Totals */}
             <div className="space-y-1 text-xs">
               <div className="flex justify-between text-muted-foreground"><span>Subtotal</span><span>{formatCurrency(subtotal)}</span></div>
               {discount > 0 && <div className="flex justify-between text-red-500"><span>Discount ({discount}%)</span><span>-{formatCurrency(discountAmount)}</span></div>}
               <div className="flex justify-between font-bold text-base text-foreground pt-1 border-t border-border"><span>Total</span><span>{formatCurrency(total)}</span></div>
             </div>
 
-            {/* Payment */}
             <div className="grid grid-cols-2 gap-1.5">
               {paymentMethods.map(m => (
                 <button key={m.id} onClick={() => setPaymentMethod(m.id)} className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border-2 text-xs font-medium transition ${paymentMethod === m.id ? m.color + ' border-current' : 'border-border text-muted-foreground hover:border-blue-200'}`}>
@@ -200,12 +243,14 @@ export default function POSPage() {
           </div>
         )}
 
-        {/* Success */}
         {orderComplete && (
-          <div className="absolute inset-0 bg-white flex flex-col items-center justify-center rounded-2xl">
+          <div className="absolute inset-0 bg-white flex flex-col items-center justify-center rounded-2xl z-10">
             <CheckCircle2 className="w-16 h-16 text-green-500 mb-3" />
             <h3 className="font-bold text-lg text-foreground">Order Complete!</h3>
-            <p className="text-sm text-muted-foreground mt-1">Payment processed successfully</p>
+            <p className="text-sm text-muted-foreground mt-1">{lastInvoiceNumber}</p>
+            <div className="flex items-center gap-2 mt-4">
+              <button onClick={() => setOrderComplete(false)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition">New Order</button>
+            </div>
           </div>
         )}
       </div>
